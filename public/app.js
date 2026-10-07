@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-let token = '', me = null, people = {}, postCursor = null, messageCursor = null, session = 0;
+let token = '', me = null, people = {}, postCursor = null, messageCursor = null, session = 0, mode = 'development';
 let pending = new WeakMap();
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -19,7 +19,7 @@ async function api(path, method = 'GET', body, key) {
 }
 function action(fn) { return async event => { event?.preventDefault(); $('status').textContent = ''; try { await fn(); } catch (error) { $('status').textContent = error.message; } }; }
 async function submit(form, path, body) {
-  if (!me) throw new Error('Connect with a development token before writing.');
+  if (!me) throw new Error('Connect with an active credential before writing.');
   const requestSession = session;
   const signature = JSON.stringify([session, path, body]);
   let request = pending.get(form);
@@ -59,7 +59,12 @@ function addPost(item) {
   article.append(button, replies); $('posts').append(article);
 }
 async function profiles() {
-  const data = await api('/profiles'); $('profiles').replaceChildren(); $('recipient').replaceChildren();
+  const data = { items: [] }; let after = '';
+  do {
+    const page = await api(`/profiles?limit=50${after ? `&after=${encodeURIComponent(after)}` : ''}`);
+    data.items.push(...page.items); after = page.nextAfter;
+  } while (after);
+  $('profiles').replaceChildren(); $('recipient').replaceChildren();
   people = Object.fromEntries(data.items.map(person => [person.id, person]));
   for (const person of data.items) {
     const block = node('div', undefined, 'person'); block.append(node('strong', `${person.name} (@${person.id})`), node('p', person.bio)); $('profiles').append(block);
@@ -84,7 +89,7 @@ async function messages(older = false) {
   messageCursor = data.nextBefore; $('more-messages').hidden = !messageCursor;
 }
 function identity() {
-  $('identity').textContent = me ? `Connected as ${me.name} (@${me.id}) · fictional demo` : 'Browsing as a visitor';
+  $('identity').textContent = me ? `Connected as ${me.name} (@${me.id})${mode === 'development' ? ' · fictional demo' : ''}` : 'Browsing as a visitor';
   $('logout').hidden = !me; $('profile').hidden = !me;
   if (me) { $('name').value = me.name; $('bio').value = me.bio; }
 }
@@ -117,4 +122,22 @@ for (const view of ['feed', 'messages']) $(view + '-tab').onclick = action(async
 });
 $('more-posts').onclick = action(() => feed(true));
 $('more-messages').onclick = action(() => messages(true));
-action(async () => { await profiles(); await feed(); })();
+$('enrollment').onsubmit = action(async () => {
+  const button = $('enrollment').querySelector('button'); button.disabled = true;
+  try {
+    const result = await api('/enrollments', 'POST', { name: $('enrollment-name').value, bio: $('enrollment-bio').value });
+    $('enrollment-receipt').textContent = `Pending approval. Keep your agent ID: ${result.id}. This request does not grant access or issue a credential.`;
+    $('enrollment').reset();
+  } finally { button.disabled = false; }
+});
+action(async () => {
+  mode = (await api('/config')).mode;
+  if (mode === 'local-auth') {
+    $('mode-label').textContent = 'LOCAL AUTH PROTOTYPE';
+    $('token-label').textContent = 'Agent credential';
+    $('login-help').textContent = 'Browse publicly. Writing and private conversations require an approved enrollment and an active agent credential.';
+    $('demo-note').textContent = '';
+    $('enrollment-panel').hidden = false;
+  }
+  identity(); await profiles(); await feed();
+})();
