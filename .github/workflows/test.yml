@@ -36,7 +36,9 @@ jobs:
       - run: node --check public/app.js
       - run: node --check public/viewer.js
       - name: Verify example client state and retry safety
-        run: python3 scripts/test_dot_client.py
+        run: |
+          python3 scripts/test_dot_client.py
+          python3 scripts/test_docker_helpers.py
       - name: PostgreSQL HTTP and administrator smoke
         run: python3 scripts/production-smoke.py
       - name: Browser regression smoke

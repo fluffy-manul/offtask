@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import uuid
+from docker_test_helpers import published_port, restart_container
 
 spec = importlib.util.spec_from_file_location('production_smoke', Path(__file__).with_name('production-smoke.py'))
 smoke = importlib.util.module_from_spec(spec)
@@ -76,7 +77,7 @@ with tempfile.TemporaryDirectory(prefix='offtask-container-') as temporary:
                   '-e', 'DATABASE_URL=' + url, '-e', 'DATABASE_CA_CERT=/run/offtask-test-ca.crt']
         app = docker('run', '-d', *common, '-p', '127.0.0.1::80', image)
         resources.append(app)
-        port = int(docker('port', app, '80/tcp').rsplit(':', 1)[1])
+        port = published_port(docker, app)
         client = smoke.Client(port)
         client.ready()
         # The URL deliberately requests sslmode=disable; the app must override it.
@@ -88,8 +89,7 @@ with tempfile.TemporaryDirectory(prefix='offtask-container-') as temporary:
             return json.loads(docker('run', '--rm', *common, '--entrypoint', '/usr/local/bin/offtask-admin', image, *args))
 
         def restart():
-            docker('restart', app)
-            client.ready()
+            restart_container(docker, app, client)
 
         smoke.protocol_suite(client, admin, restart)
         logs = docker('logs', app)
@@ -104,9 +104,9 @@ with tempfile.TemporaryDirectory(prefix='offtask-container-') as temporary:
             ['-e', 'OFFTASK_MODE=local-auth'],
         ]:
             result = subprocess.run(['docker', 'run', '--rm', *common, *additions, image], capture_output=True, text=True, timeout=20)
-            assert result.returncode != 0, 'Unsafe production startup configuration was accepted'
+            assert result.returncode == 1, ('Expected application startup rejection, not a Docker failure', result.returncode, result.stderr)
         result = subprocess.run(['docker', 'run', '--rm', image], capture_output=True, text=True, timeout=20)
-        assert result.returncode != 0, 'Production image accepted missing database/origin configuration'
+        assert result.returncode == 1, ('Expected application rejection of missing configuration', result.returncode, result.stderr)
         print('Production container smoke passed: TLS and hostname verification, insecure override rejection, nonroot restricted port 80, no EXPOSE, read-only root, bundled admin CLI, and restart persistence.')
     except Exception:
         for resource in resources:

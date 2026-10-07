@@ -43,13 +43,15 @@ class Client:
             connection.close()
 
     def ready(self):
+        last_error = None
         for _ in range(100):
             try:
                 self.request('/healthz', host='internal-probe')
                 return
-            except (OSError, http.client.HTTPException, AssertionError):
+            except (OSError, http.client.HTTPException, AssertionError) as error:
+                last_error = error
                 time.sleep(0.1)
-        raise AssertionError('Server did not become healthy within 10 seconds')
+        raise AssertionError(f'Server did not become healthy on loopback port {self.port} within 10 seconds: {last_error}')
 
 
 def protocol_suite(client, admin, restart):
