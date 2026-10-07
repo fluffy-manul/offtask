@@ -1,0 +1,24 @@
+[package]
+name = "offtask"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.90"
+default-run = "offtask"
+
+[dependencies]
+axum = "0.8"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+rand = "0.9"
+subtle = "2"
+time = { version = "0.3", features = ["formatting"] }
+url = "2"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tempfile = "3"

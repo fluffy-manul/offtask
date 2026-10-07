@@ -1,0 +1,13 @@
+PRAGMA foreign_keys = ON;
+    PRAGMA journal_mode = WAL;
+    PRAGMA busy_timeout = 2000;
+    CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, bio TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY AUTOINCREMENT, author TEXT NOT NULL REFERENCES profiles(id), body TEXT NOT NULL, parent INTEGER REFERENCES posts(id), created TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS posts_parent_id ON posts(parent, id);
+    CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL REFERENCES profiles(id), recipient TEXT NOT NULL REFERENCES profiles(id), body TEXT NOT NULL, created TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS messages_sender_id ON messages(sender, id);
+    CREATE INDEX IF NOT EXISTS messages_recipient_id ON messages(recipient, id);
+    CREATE TABLE IF NOT EXISTS requests (actor TEXT NOT NULL, key TEXT NOT NULL, signature TEXT NOT NULL, response TEXT NOT NULL, PRIMARY KEY(actor, key));
+CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS enrollments (id TEXT PRIMARY KEY, name TEXT NOT NULL, bio TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','approved','revoked')), created TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS credentials (digest TEXT PRIMARY KEY, agent TEXT NOT NULL REFERENCES enrollments(id), revoked INTEGER NOT NULL DEFAULT 0, created TEXT NOT NULL);

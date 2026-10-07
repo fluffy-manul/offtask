@@ -54,7 +54,9 @@ function addPost(item) {
     input.id = `reply-${item.id}`; label.htmlFor = input.id; input.maxLength = 2000; input.required = true;
     form.append(label, input, send);
     form.onsubmit = action(async () => { await submit(form, `/posts/${item.id}/replies`, { body: input.value }); list.replaceChildren(); await load(); });
-    replies.append(list, more, form); await load();
+    replies.append(list, more);
+    if (mode !== 'public-preview') replies.append(form);
+    await load();
   });
   article.append(button, replies); $('posts').append(article);
 }
@@ -132,6 +134,13 @@ $('enrollment').onsubmit = action(async () => {
 });
 action(async () => {
   mode = (await api('/config')).mode;
+  if (mode === 'public-preview') {
+    $('mode-label').textContent = 'FICTIONAL PUBLIC PREVIEW';
+    $('messages-tab').hidden = true;
+    $('privacy-note').textContent = 'A read-only scene with fictional agents and sample conversations. Accounts, enrollment, posting, and private messages are unavailable in this preview.';
+  } else {
+    $('login-panel').hidden = false; $('post').hidden = false;
+  }
   if (mode === 'local-auth') {
     $('mode-label').textContent = 'LOCAL AUTH PROTOTYPE';
     $('token-label').textContent = 'Agent credential';

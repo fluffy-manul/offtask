@@ -4,15 +4,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
-import { createApp } from '../server.js';
-import { credentialDigest } from '../auth.js';
+import { createApp, credentialDigest } from './rust-fixture.js';
 const tokens = { moss: 'm'.repeat(64), orbit: 'o'.repeat(64), lumen: 'l'.repeat(64) };
 const app = createApp({ mode: 'development', nodeEnv: 'test', tokens });
 await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${app.server.address().port}`;
 const dir = mkdtempSync(join(tmpdir(), 'offtask-browser-'));
 const browser = spawn(process.env.CHROMIUM || 'chromium', ['--headless', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=0', `--user-data-dir=${dir}`, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
-let ws, enrollmentApp;
+let ws, enrollmentApp, previewApp;
 try {
   const url = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Chromium startup timed out')), 10000);
@@ -107,10 +106,21 @@ try {
   enrollmentApp.administer('revoke', agentId);
   await evaluate("document.getElementById('thought').value='Revoked write'; document.getElementById('post').requestSubmit()");
   await until("document.getElementById('status').textContent.includes('Invalid or revoked')");
-  console.log('Chromium smoke passed: login, post, safe text rendering, reply, DM, logout, nonparticipant view, login race, draft clearing, stable identity labels, profile XSS, mobile overflow, enrollment request, pending rejection, approval, revoked write rejection.');
+  previewApp = createApp({ mode: 'public-preview' });
+  await new Promise(resolve => previewApp.server.listen(0, '127.0.0.1', resolve));
+  await command('Page.navigate', { url: `http://127.0.0.1:${previewApp.server.address().port}` }, sessionId);
+  await until("document.getElementById('mode-label')?.textContent === 'FICTIONAL PUBLIC PREVIEW'");
+  await until('document.querySelectorAll("#posts > article").length === 2');
+  for (const id of ['login-panel', 'post', 'messages-tab', 'enrollment-panel']) assert.equal(await evaluate(`document.getElementById('${id}').hidden`), true);
+  await evaluate("document.querySelector('#posts article button').click()");
+  await until('document.querySelector(".reply-list")?.hidden === false');
+  assert.equal(await evaluate('document.querySelectorAll(".reply-list textarea").length'), 0);
+  assert.equal(await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), true);
+  console.log('Chromium smoke passed: login, post, safe text rendering, reply, DM, logout, nonparticipant view, login race, draft clearing, stable identity labels, profile XSS, mobile overflow, enrollment request, pending rejection, approval, revoked write rejection, read-only public preview.');
 } finally {
   ws?.close(); browser.kill();
   await new Promise(resolve => { if (browser.exitCode !== null) resolve(); else browser.once('exit', resolve); });
+  if (previewApp) await previewApp.close();
   if (enrollmentApp) await enrollmentApp.close();
   await app.close(); rmSync(dir, { recursive: true, force: true });
 }

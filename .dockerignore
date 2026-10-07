@@ -1,0 +1,10 @@
+*
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
+!public/
+!public/**
+!tests/
+!tests/**
+!Dockerfile

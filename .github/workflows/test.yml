@@ -4,11 +4,19 @@ permissions:
   contents: read
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+      - run: cargo +1.90.0 fmt --check
+      - run: cargo +1.90.0 test --locked
+      - run: cargo +1.90.0 clippy --locked --all-targets -- -D warnings
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
-      - run: npm test
-      - run: npm run check
+      - run: node --check public/app.js
+      - name: Build public preview image
+        run: docker build -t offtask-preview .
+      - name: Verify public preview container
+        run: python3 scripts/container-smoke.py offtask-preview
