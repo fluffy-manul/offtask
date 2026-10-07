@@ -14,6 +14,9 @@ async fn main() {
     }
 }
 async fn run() -> offtask::Result<()> {
+    if env::var("OFFTASK_MODE").as_deref() == Ok("production") {
+        return production().await;
+    }
     let mode = Mode::parse(
         &env::var("OFFTASK_MODE").unwrap_or_default(),
         env::var("NODE_ENV").ok().as_deref(),
@@ -90,6 +93,45 @@ async fn run() -> offtask::Result<()> {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 .expect("signal handler");
         tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+    })
+    .await
+    .map_err(|_| offtask::Error(500, "HTTP server failed".into()))
+}
+
+async fn production() -> offtask::Result<()> {
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    if !args.is_empty() && args != ["--production"] {
+        return Err(offtask::Error(
+            400,
+            "Production requires the --production entrypoint".into(),
+        ));
+    }
+    let port = env::var("PORT")
+        .unwrap_or_else(|_| "80".into())
+        .parse::<u16>()
+        .map_err(|_| offtask::Error(400, "Invalid PORT".into()))?;
+    if port != 80 && !matches!(env::var("NODE_ENV").as_deref(), Ok("test" | "development")) {
+        return Err(offtask::Error(
+            400,
+            "Production must listen on port 80".into(),
+        ));
+    }
+    let pool = offtask::production::database_from_env().await?;
+    let app = offtask::production::Production::new(
+        pool,
+        &env::var("PUBLIC_ORIGIN")
+            .map_err(|_| offtask::Error(400, "PUBLIC_ORIGIN is required".into()))?,
+    )
+    .await?;
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
+        .await
+        .map_err(|_| offtask::Error(500, "Cannot bind listener".into()))?;
+    println!("Offtask production listening on 0.0.0.0:{port}");
+    offtask::http_server::serve(listener, app.router(), async {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("signal handler");
+        tokio::select! {_ = tokio::signal::ctrl_c()=>{},_=terminate.recv()=>{}}
     })
     .await
     .map_err(|_| offtask::Error(500, "HTTP server failed".into()))

@@ -1,11 +1,11 @@
-"""Validate a built public-preview image; creates no external resources."""
+"""Validate the explicit read-only preview override of the production image."""
 import http.client
 import json
 import subprocess
 import sys
 import time
 
-image = sys.argv[1] if len(sys.argv) > 1 else 'offtask-preview'
+image = sys.argv[1] if len(sys.argv) > 1 else 'offtask'
 
 def docker(*args):
     return subprocess.check_output(['docker', *args], text=True).strip()
@@ -13,7 +13,8 @@ def docker(*args):
 assert docker('image', 'inspect', '--format', '{{.Config.User}}', image) == '10001:10001'
 container = docker('run', '-d', '--read-only', '--cap-drop=ALL', '--cap-add=NET_BIND_SERVICE',
                    '--sysctl', 'net.ipv4.ip_unprivileged_port_start=1024',
-                   '-p', '127.0.0.1::80', '-e', 'PUBLIC_ORIGIN=https://offtask.example', image)
+                   '-p', '127.0.0.1::80', '-e', 'PUBLIC_ORIGIN=https://offtask.example',
+                   '-e', 'OFFTASK_MODE=public-preview', image, '--public-preview')
 try:
     port = int(docker('port', container, '80/tcp').rsplit(':', 1)[1])
     def request(path, method='GET', host='offtask.example', origin=None):
@@ -52,6 +53,7 @@ finally:
 
 for env in [[], ['-e', 'PUBLIC_ORIGIN=http://offtask.example'],
             ['-e', 'OFFTASK_MODE=local-auth', '-e', 'NODE_ENV=test', '-e', 'PUBLIC_ORIGIN=https://offtask.example']]:
-    result = subprocess.run(['docker', 'run', '--rm', *env, image], capture_output=True, text=True, timeout=15)
+    result = subprocess.run(['docker', 'run', '--rm', '-e', 'OFFTASK_MODE=public-preview',
+                             *env, image, '--public-preview'], capture_output=True, text=True, timeout=15)
     assert result.returncode != 0, 'Unsafe startup configuration was accepted'
 print('Container startup rejection checks passed.')

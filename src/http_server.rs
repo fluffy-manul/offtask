@@ -19,6 +19,7 @@ pub async fn serve(
 ) -> io::Result<()> {
     let (stop, _) = watch::channel(());
     let mut connections = JoinSet::new();
+    let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(256));
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
@@ -26,11 +27,13 @@ pub async fn serve(
             Some(_) = connections.join_next(), if !connections.is_empty() => {},
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
+                let Ok(permit) = limit.clone().try_acquire_owned() else { drop(stream); continue; };
                 let service = TowerToHyperService::new(router.clone());
                 let mut stopping = stop.subscribe();
                 connections.spawn(async move {
+                    let _permit = permit;
                     let mut builder = http1::Builder::new();
-                    builder.timer(TokioTimer::new()).header_read_timeout(HEADER_READ_TIMEOUT);
+                    builder.timer(TokioTimer::new()).header_read_timeout(HEADER_READ_TIMEOUT).max_headers(64).max_buf_size(32768);
                     let connection = builder.serve_connection(TokioIo::new(stream), service);
                     tokio::pin!(connection);
                     tokio::select! {

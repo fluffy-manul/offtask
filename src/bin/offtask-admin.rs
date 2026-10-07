@@ -9,6 +9,17 @@ fn main() {
     }
 }
 fn run() -> offtask::Result<()> {
+    if env::var("OFFTASK_MODE").as_deref() == Ok("production") {
+        return tokio::runtime::Runtime::new()
+            .map_err(|_| offtask::Error(500, "Runtime unavailable".into()))?
+            .block_on(async {
+                let pool = offtask::production::database_from_env().await?;
+                let args = env::args().skip(1).collect::<Vec<_>>();
+                let value = offtask::production::administer(&pool, &args).await?;
+                println!("{value}");
+                Ok(())
+            });
+    }
     if offtask::Mode::parse(
         &env::var("OFFTASK_MODE").unwrap_or_default(),
         env::var("NODE_ENV").ok().as_deref(),

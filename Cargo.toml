@@ -1,6 +1,6 @@
 [package]
 name = "offtask"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.90"
 default-run = "offtask"
@@ -18,6 +18,10 @@ rand = "0.9"
 subtle = "2"
 time = { version = "0.3", features = ["formatting"] }
 url = "2"
+
+# These SQLx internal crates must stay exactly version-matched; see src/pg.rs.
+sqlx-core = { version = "=0.8.6", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-webpki", "json"] }
+sqlx-postgres = { version = "=0.8.6", default-features = false, features = ["json"] }
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json"] }

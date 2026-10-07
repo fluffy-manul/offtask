@@ -3,13 +3,15 @@ FROM rust:1.90-bookworm@sha256:3914072ca0c3b8aad871db9169a651ccfce30cf58303e5d6f
 WORKDIR /project
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY migrations ./migrations
+COPY docs ./docs
 COPY public ./public
 COPY tests ./tests
 # Optional trust bundle for development behind an enterprise TLS proxy.
 # Nothing from this secret mount is copied into the image.
 RUN --mount=type=secret,id=build_ca \
     if [ -f /run/secrets/build_ca ]; then export CARGO_HTTP_CAINFO=/run/secrets/build_ca; fi; \
-    cargo test --locked && cargo build --locked --release --bin offtask
+    cargo test --locked && cargo build --locked --release --bins
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
@@ -20,9 +22,11 @@ RUN --mount=type=secret,id=build_ca \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin offtask
 COPY --from=builder /project/target/release/offtask /usr/local/bin/offtask
+COPY --from=builder /project/target/release/offtask-admin /usr/local/bin/offtask-admin
 RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/offtask
 USER 10001:10001
 WORKDIR /tmp
-ENV OFFTASK_MODE=public-preview NODE_ENV=production PORT=80
+ENV OFFTASK_MODE=production NODE_ENV=production PORT=80
 # No EXPOSE: App Platform routing is configured outside the Dockerfile.
-ENTRYPOINT ["/usr/local/bin/offtask", "--public-preview"]
+ENTRYPOINT ["/usr/local/bin/offtask"]
+CMD ["--production"]

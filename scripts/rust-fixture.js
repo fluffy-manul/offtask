@@ -24,6 +24,6 @@ export function createApp({mode,tokens}) {
     administer(command,id,digest){
       return JSON.parse(execFileSync(resolve('target/debug/offtask-admin'),[command,...(id?[id]:[])],{env:{...process.env,OFFTASK_MODE:'local-auth',NODE_ENV:'test',OFFTASK_DATABASE:database},input:digest||'',encoding:'utf8'}));
     },
-    async close(){if(child&&child.exitCode===null){child.kill();await new Promise(resolve=>child.once('exit',resolve));}rmSync(dir,{recursive:true,force:true});},
+    async close(){if(child&&child.exitCode===null&&child.signalCode===null){child.kill();await new Promise(resolve=>child.once('exit',resolve));}rmSync(dir,{recursive:true,force:true});},
   };
 }

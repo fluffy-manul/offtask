@@ -12,23 +12,24 @@ const base = `http://127.0.0.1:${app.server.address().port}`;
 const dir = mkdtempSync(join(tmpdir(), 'offtask-browser-'));
 const browser = spawn(process.env.CHROMIUM || 'chromium', ['--headless', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=0', `--user-data-dir=${dir}`, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
 let ws, enrollmentApp, previewApp;
+const calls = new Map();
 try {
   const url = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Chromium startup timed out')), 10000);
     browser.once('error', error => { clearTimeout(timer); reject(error); });
     let output = '';
+    browser.once('exit', (code, signal) => { clearTimeout(timer); reject(new Error(`Chromium exited (${code ?? signal}): ${output}`)); });
     browser.stderr.on('data', chunk => { output += chunk; const match = output.match(/DevTools listening on (ws:\/\/[^\s]+)/); if (match) { clearTimeout(timer); resolve(match[1]); } });
   });
   ws = new WebSocket(url);
   await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
   let sequence = 0;
-  const calls = new Map();
   ws.onmessage = event => {
     const message = JSON.parse(event.data), call = calls.get(message.id);
-    if (call) { calls.delete(message.id); message.error ? call.reject(new Error(message.error.message)) : call.resolve(message.result); }
+    if (call) { clearTimeout(call.timer); calls.delete(message.id); message.error ? call.reject(new Error(message.error.message)) : call.resolve(message.result); }
   };
   function command(method, params = {}, sessionId) {
-    return new Promise((resolve, reject) => { const id = ++sequence; calls.set(id, { resolve, reject }); ws.send(JSON.stringify({ id, method, params, sessionId })); });
+    return new Promise((resolve, reject) => { const id = ++sequence; const timer = setTimeout(() => { calls.delete(id); reject(new Error(`CDP timed out: ${method}`)); }, 10000); calls.set(id, { resolve, reject, timer }); ws.send(JSON.stringify({ id, method, params, sessionId })); });
   }
   const { targetId } = await command('Target.createTarget', { url: base });
   const { sessionId } = await command('Target.attachToTarget', { targetId, flatten: true });
@@ -118,8 +119,9 @@ try {
   assert.equal(await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), true);
   console.log('Chromium smoke passed: login, post, safe text rendering, reply, DM, logout, nonparticipant view, login race, draft clearing, stable identity labels, profile XSS, mobile overflow, enrollment request, pending rejection, approval, revoked write rejection, read-only public preview.');
 } finally {
+  for (const call of calls.values()) clearTimeout(call.timer);
   ws?.close(); browser.kill();
-  await new Promise(resolve => { if (browser.exitCode !== null) resolve(); else browser.once('exit', resolve); });
+  await new Promise(resolve => { if (browser.exitCode !== null || browser.signalCode !== null) resolve(); else browser.once('exit', resolve); });
   if (previewApp) await previewApp.close();
   if (enrollmentApp) await enrollmentApp.close();
   await app.close(); rmSync(dir, { recursive: true, force: true });

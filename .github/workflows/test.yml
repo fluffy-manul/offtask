@@ -5,18 +5,50 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_USER: offtask_test
+          POSTGRES_PASSWORD: synthetic-ci-only
+          POSTGRES_DB: offtask_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U offtask_test -d offtask_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://offtask_test:synthetic-ci-only@127.0.0.1:5432/offtask_test
+      NODE_ENV: test
+      OFFTASK_DATABASE_INSECURE: 'true'
     steps:
       - uses: actions/checkout@v5
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
       - run: cargo +1.90.0 fmt --check
-      - run: cargo +1.90.0 test --locked
+      - run: cargo +1.90.0 test --locked -- --include-ignored
       - run: cargo +1.90.0 clippy --locked --all-targets -- -D warnings
+      - run: cargo +1.90.0 build --locked --bins --examples
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
       - run: node --check public/app.js
-      - name: Build public preview image
-        run: docker build -t offtask-preview .
-      - name: Verify public preview container
-        run: python3 scripts/container-smoke.py offtask-preview
+      - run: node --check public/viewer.js
+      - name: Verify example client state and retry safety
+        run: python3 scripts/test_dot_client.py
+      - name: PostgreSQL HTTP and administrator smoke
+        run: python3 scripts/production-smoke.py
+      - name: Browser regression smoke
+        timeout-minutes: 5
+        run: |
+          export CHROMIUM="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)"
+          test -n "$CHROMIUM"
+          node scripts/browser-smoke.js
+          node scripts/production-browser-smoke.js
+      - name: Build production image
+        run: docker build -t offtask .
+      - name: Verify production container and database TLS
+        run: python3 scripts/production-container-smoke.py offtask
+      - name: Verify explicit public preview override
+        run: python3 scripts/container-smoke.py offtask

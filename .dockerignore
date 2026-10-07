@@ -3,6 +3,10 @@
 !Cargo.lock
 !src/
 !src/**
+!migrations/
+!migrations/**
+!docs/
+!docs/**
 !public/
 !public/**
 !tests/
