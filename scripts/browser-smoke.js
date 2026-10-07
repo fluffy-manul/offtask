@@ -5,13 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { createApp } from '../server.js';
+import { credentialDigest } from '../auth.js';
 const tokens = { moss: 'm'.repeat(64), orbit: 'o'.repeat(64), lumen: 'l'.repeat(64) };
 const app = createApp({ mode: 'development', nodeEnv: 'test', tokens });
 await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${app.server.address().port}`;
 const dir = mkdtempSync(join(tmpdir(), 'offtask-browser-'));
 const browser = spawn(process.env.CHROMIUM || 'chromium', ['--headless', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=0', `--user-data-dir=${dir}`, 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'] });
-let ws;
+let ws, enrollmentApp;
 try {
   const url = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Chromium startup timed out')), 10000);
@@ -85,9 +86,31 @@ try {
   assert.equal(await evaluate("document.querySelectorAll('#profiles img').length"), 0);
   await command('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }, sessionId);
   assert.equal(await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), true);
-  console.log('Chromium smoke passed: login, post, safe text rendering, reply, DM, logout, nonparticipant view, login race, draft clearing, stable identity labels, profile XSS, mobile overflow.');
+  // Exercise the separate enrollment UI with synthetic identities only.
+  enrollmentApp = createApp({ mode: 'local-auth', nodeEnv: 'test' });
+  await new Promise(resolve => enrollmentApp.server.listen(0, '127.0.0.1', resolve));
+  await command('Page.navigate', { url: `http://127.0.0.1:${enrollmentApp.server.address().port}` }, sessionId);
+  await until("document.getElementById('mode-label')?.textContent === 'LOCAL AUTH PROTOTYPE'");
+  assert.equal(await evaluate("document.querySelectorAll('.person').length"), 0);
+  await evaluate("document.getElementById('enrollment-name').value='Synthetic browser agent'; document.getElementById('enrollment-bio').value='Synthetic test fixture'; document.getElementById('enrollment').requestSubmit()");
+  await until("document.getElementById('enrollment-receipt').textContent.includes('Pending approval')");
+  const agentId = await evaluate("document.getElementById('enrollment-receipt').textContent.match(/[0-9a-f-]{36}/)[0]");
+  const syntheticToken = 'offtask_' + 'a'.repeat(64);
+  await evaluate(`document.getElementById('token').value='${syntheticToken}'; document.getElementById('login').requestSubmit()`);
+  await until("document.getElementById('status').textContent.includes('Invalid or revoked')");
+  enrollmentApp.administer('approve', agentId);
+  enrollmentApp.administer('rotate', agentId, credentialDigest(syntheticToken));
+  await evaluate(`document.getElementById('token').value='${syntheticToken}'; document.getElementById('login').requestSubmit()`);
+  await until("document.getElementById('identity').textContent.includes('Connected as Synthetic browser agent')");
+  await until('document.querySelectorAll(".person").length === 1');
+  assert.equal(await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), true);
+  enrollmentApp.administer('revoke', agentId);
+  await evaluate("document.getElementById('thought').value='Revoked write'; document.getElementById('post').requestSubmit()");
+  await until("document.getElementById('status').textContent.includes('Invalid or revoked')");
+  console.log('Chromium smoke passed: login, post, safe text rendering, reply, DM, logout, nonparticipant view, login race, draft clearing, stable identity labels, profile XSS, mobile overflow, enrollment request, pending rejection, approval, revoked write rejection.');
 } finally {
   ws?.close(); browser.kill();
   await new Promise(resolve => { if (browser.exitCode !== null) resolve(); else browser.once('exit', resolve); });
+  if (enrollmentApp) await enrollmentApp.close();
   await app.close(); rmSync(dir, { recursive: true, force: true });
 }
