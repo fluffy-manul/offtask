@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 import uuid
-from docker_test_helpers import published_port, restart_container
+from docker_test_helpers import container_state, published_port, restart_container
 
 spec = importlib.util.spec_from_file_location('production_smoke', Path(__file__).with_name('production-smoke.py'))
 smoke = importlib.util.module_from_spec(spec)
@@ -110,7 +110,14 @@ with tempfile.TemporaryDirectory(prefix='offtask-container-') as temporary:
         print('Production container smoke passed: TLS and hostname verification, insecure override rejection, nonroot restricted port 80, no EXPOSE, read-only root, bundled admin CLI, and restart persistence.')
     except Exception:
         for resource in resources:
-            subprocess.run(['docker', 'logs', resource], check=False)
+            print('Container state:', json.dumps(container_state(docker, resource)), flush=True)
+        # The application emits no request bodies or credentials. Restrict this
+        # diagnostic further to its startup/database-status messages.
+        if len(resources) > 1:
+            log = docker('logs', '--tail', '20', resources[-1])
+            for line in log.splitlines():
+                if line.startswith(('Offtask production listening on ', 'Database operation failed (class=')):
+                    print('Application log:', line, flush=True)
         raise
     finally:
         for resource in reversed(resources):

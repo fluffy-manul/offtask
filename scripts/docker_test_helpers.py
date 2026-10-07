@@ -1,4 +1,6 @@
 """Small Docker smoke helpers; importing this module never starts a container."""
+import json
+import time
 
 
 def published_port(docker, container):
@@ -12,10 +14,29 @@ def published_port(docker, container):
     return int(port)
 
 
+def container_state(docker, container):
+    """Whitelist operational fields; never emit config, environment or raw errors."""
+    try:
+        state = json.loads(docker('inspect', '--format', '{{json .State}}', container))
+        return {key: state.get(key) for key in
+                ('Running', 'Restarting', 'OOMKilled', 'ExitCode', 'StartedAt', 'FinishedAt')}
+    except Exception:
+        return {'inspection': 'unavailable'}
+
+
 def restart_container(docker, container, client):
-    """Docker may assign a new ephemeral published port when a container restarts."""
+    """Refresh the ephemeral endpoint; preserve the original health-check deadline."""
     previous_port = client.port
+    started = time.monotonic()
     docker('restart', container)
-    client.port = published_port(docker, container)
-    print(f'Container restarted: loopback HTTP port {previous_port} -> {client.port}', flush=True)
-    client.ready()
+    restarted = time.monotonic()
+    try:
+        client.port = published_port(docker, container)
+        print(f'Container restarted: loopback HTTP port {previous_port} -> {client.port}', flush=True)
+        client.ready()
+    finally:
+        # Docker restart includes stop/drain and start. Application graceful drain
+        # remains bounded at 20 seconds; this is timing evidence, not a longer retry.
+        print(json.dumps({'restartRoundTripSeconds': round(restarted - started, 3),
+                          'healthCheckSeconds': round(time.monotonic() - restarted, 3),
+                          'state': container_state(docker, container)}), flush=True)
