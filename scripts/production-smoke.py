@@ -119,6 +119,18 @@ def protocol_suite(client, admin, restart):
     assert private_id not in json.dumps(outsider_sync)
     request(prefix + '/sync?after=0&limit=100', token=b['accessToken'])
 
+    subscription_path = prefix + '/subscriptions/friends-' + run[:16]
+    filters = {'senders': [b_id], 'visibility': 'private'}
+    subscription = request(subscription_path, 'PUT', filters, token=a['accessToken'])
+    assert subscription['acknowledgedCursor'] == subscription['deliveredCursor'] == '0'
+    assert request(subscription_path, 'PUT', filters, token=a['accessToken']) == subscription
+    request(subscription_path, token=c['accessToken'], expected=404)
+    request(subscription_path, 'PUT', {**filters, 'visibility': 'public'}, token=a['accessToken'], expected=409)
+    empty_inbox = request(subscription_path + '/events?limit=2', token=a['accessToken'])
+    assert empty_inbox['items'] == []  # Our own opening private entry does not notify us.
+    request(subscription_path + '/ack', 'POST', {'cursor': empty_inbox['nextCursor'], 'generation': subscription['generation']}, token=a['accessToken'])
+    request(subscription_path + '/ack', 'POST', {'cursor': '9223372036854775807', 'generation': subscription['generation']}, token=a['accessToken'], expected=409)
+
     concurrent_key = 'smoke-concurrent-' + run
     def duplicate_write(_):
         return request(prefix + '/conversations/' + public_id + '/entries', 'POST',
@@ -146,6 +158,12 @@ def protocol_suite(client, admin, restart):
     request(prefix + '/blocks', 'DELETE', {'account': b_id}, a['accessToken'])
     request(private_path + '/entries', 'POST', {'body': 'Unblocked'}, b['accessToken'], 'smoke-unblocked-' + run, 201)
 
+    pending_inbox = request(subscription_path + '/events?limit=2', token=a['accessToken'])
+    assert [event['entry']['body'] for event in pending_inbox['items']] == ['Unblocked']
+    saved_ack = request(subscription_path, token=a['accessToken'])['acknowledgedCursor']
+    assert saved_ack == empty_inbox['nextCursor']
+    assert request(subscription_path + '/events?limit=2', token=a['accessToken'])['items'] == pending_inbox['items']
+
     rotated = request(prefix + '/auth/rotate', 'POST', {}, token=a['accessToken'])
     request(prefix + '/me', token=a['accessToken'], expected=401)
     request(private_path, token=a['accessToken'], expected=401)
@@ -157,6 +175,15 @@ def protocol_suite(client, admin, restart):
     restart()
     assert request(prefix + '/conversations', 'POST', payload, recovered['accessToken'], key, 201) == public
     request(private_path, token=recovered['accessToken'])
+    # A new client with no local files discovers and resumes the same server inbox.
+    persisted = request(prefix + '/subscriptions', token=recovered['accessToken'])['items']
+    found = next(item for item in persisted if item['name'] == subscription['name'])
+    assert found['acknowledgedCursor'] == saved_ack
+    assert request(subscription_path + '/events?limit=2', token=recovered['accessToken'])['items'] == pending_inbox['items']
+    acknowledged = request(subscription_path + '/ack', 'POST', {'cursor': pending_inbox['nextCursor'], 'generation': subscription['generation']}, token=recovered['accessToken'])
+    assert acknowledged['acknowledgedCursor'] == pending_inbox['nextCursor']
+    assert request(subscription_path + '/ack', 'POST', {'cursor': pending_inbox['nextCursor'], 'generation': subscription['generation']}, token=recovered['accessToken']) == acknowledged
+    assert request(subscription_path + '/events?limit=2', token=recovered['accessToken'])['items'] == []
     admin('revoke', a_id)
     request(prefix + '/me', token=recovered['accessToken'], expected=401)
     request(prefix + '/auth/recover', 'POST', {'recoveryToken': recovered['recoveryToken']}, expected=401)
@@ -182,7 +209,7 @@ def protocol_suite(client, admin, restart):
     # End the synthetic accounts' authenticated access without deleting shared data.
     for account in (a, b, c):
         admin('revoke', account['account'])
-    print('PostgreSQL HTTP smoke passed: declaration, single-use invitations, identity, public/private conversations, IDOR, sync isolation, concurrent retries, paginated sync, pair/group blocking, redaction/replay safety, rotation, recovery, revocation, audit, and process-restart persistence.')
+    print('PostgreSQL HTTP smoke passed: declaration, single-use invitations, identity, public/private conversations, IDOR, sync isolation, concurrent retries, paginated sync, pair/group blocking, redaction/replay safety, rotation, recovery, revocation, audit, process-restart persistence, and durable subscription ACK/replay across credential recovery and client reset.')
 
 
 def main():

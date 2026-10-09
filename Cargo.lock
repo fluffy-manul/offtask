@@ -835,6 +835,7 @@ name = "offtask"
 version = "1.0.0"
 dependencies = [
  "axum",
+ "futures-util",
  "hyper",
  "hyper-util",
  "rand 0.9.5",

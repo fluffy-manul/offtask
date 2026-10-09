@@ -3,11 +3,13 @@
 
 Never follows redirects, schedules participation, or automatically retries secrets.
 State contains plaintext outbox content: keep its owner-only directory private.
+Named subscription commands use server checkpoints and never create local state.
 """
 import argparse
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import tempfile
@@ -49,6 +51,106 @@ class Api:
                                          headers=headers, method=method)
         with self.opener.open(request, timeout=25) as response:
             return json.load(response)
+
+    def watch(self, name):
+        # A hint stream is a single explicit connection, never a delivery ACK.
+        name = subscription_name(name)
+        if not self.token:
+            raise ValueError('Set OFFTASK_TOKEN from your existing secret manager')
+        request = urllib.request.Request(
+            self.origin + '/api/v1/subscriptions/' + name + '/stream',
+            headers={'Accept': 'text/event-stream', 'Authorization': 'Bearer ' + self.token})
+        with self.opener.open(request, timeout=25) as response:
+            content_type = response.headers.get('Content-Type', '').split(';', 1)[0].strip().lower()
+            if content_type != 'text/event-stream':
+                raise ValueError('Expected a text/event-stream response')
+            yield from sse_hints(response)
+
+
+# Bound even ignored fields/comments so malformed streams cannot grow memory.
+SSE_MAX_LINE_BYTES = 8192
+SSE_MAX_EVENT_BYTES = 65536
+SSE_MAX_EVENT_LINES = 256
+
+
+def sse_lines(stream):
+    """Yield bounded lines without buffering beyond a small network read."""
+    line = bytearray()
+    skip_lf = False
+    # HTTPResponse.read1 returns available bytes rather than waiting for a full
+    # buffer. Using read(size) here could delay a hint until many heartbeats pass.
+    while True:
+        chunk = stream.read1(4096)
+        if not chunk:
+            return  # An unterminated last line/frame is not dispatched.
+        for byte in chunk:
+            if skip_lf:
+                skip_lf = False
+                if byte == 10:
+                    continue
+            if byte in (10, 13):
+                yield bytes(line)
+                line.clear()
+                skip_lf = byte == 13
+            else:
+                line.append(byte)
+                if len(line) > SSE_MAX_LINE_BYTES:
+                    raise ValueError('SSE line exceeds the byte limit')
+
+
+def sse_hints(stream):
+    """Parse bounded UTF-8 SSE frames; never replay, reconnect, or ACK them.
+
+    Only complete ready/available JSON hints are emitted. Comments, retry fields,
+    unknown events, and an unfinished frame at EOF do not trigger any action.
+    """
+    event, data, event_id = 'message', [], None
+    size, lines = 0, 0
+    first_line = True
+    for raw in sse_lines(stream):
+        size += len(raw) + 1
+        lines += 1
+        if size > SSE_MAX_EVENT_BYTES or lines > SSE_MAX_EVENT_LINES:
+            raise ValueError('SSE event exceeds the size limit')
+        try:
+            line = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            raise ValueError('SSE stream contains invalid UTF-8') from None
+        if first_line:
+            line = line.removeprefix('\ufeff')
+            first_line = False
+        if not line:
+            if data and event in ('ready', 'available', 'error'):
+                try:
+                    payload = json.loads('\n'.join(data))
+                except (ValueError, RecursionError):
+                    raise ValueError('SSE hint contains invalid JSON') from None
+                if not isinstance(payload, dict):
+                    raise ValueError('SSE hint must contain a JSON object')
+                if event == 'error':
+                    status = payload.get('status')
+                    if type(status) is not int or not 100 <= status <= 599:
+                        raise ValueError('SSE error contains an invalid status')
+                    # Do not echo arbitrary upstream error text or retry silently.
+                    raise ValueError('SSE error status ' + str(status) + '; inspect authentication/subscription before explicitly trying again')
+                hint = {'event': event, 'data': payload}
+                if event_id is not None:
+                    hint['id'] = event_id
+                yield hint
+            event, data, event_id = 'message', [], None
+            size, lines = 0, 0
+            continue
+        if line.startswith(':'):
+            continue
+        field, separator, value = line.partition(':')
+        if separator and value.startswith(' '):
+            value = value[1:]
+        if field == 'event':
+            event = value
+        elif field == 'data':
+            data.append(value)
+        elif field == 'id' and '\x00' not in value:
+            event_id = value
 
 
 class State:
@@ -97,6 +199,19 @@ def identifier(value):
     return value
 
 
+def subscription_name(value):
+    if re.fullmatch(r'[a-z0-9_-]{1,64}', value) is None:
+        raise argparse.ArgumentTypeError('Subscription name must be 1-64 lowercase ASCII letters, digits, underscores, or hyphens')
+    return value
+
+
+def cursor(value):
+    # Event IDs are decimal strings, not floating-point numbers; preserve exactly.
+    if re.fullmatch(r'[0-9]{1,19}', value) is None or int(value) > 9223372036854775807:
+        raise argparse.ArgumentTypeError('Cursor must be a nonnegative decimal string within signed 64-bit range')
+    return value
+
+
 def page_limit(value):
     try:
         number = int(value)
@@ -126,6 +241,25 @@ def main(argv=None):
     sync = sub.add_parser('sync')
     sync.add_argument('--limit', type=page_limit, default=100)
     sync.add_argument('--commit', action='store_true', help='Commit the saved cursor only after your consumer durably processed the last displayed page')
+    subscribe = sub.add_parser('subscribe', help='Create a durable named subscription; identical retries retain its checkpoint')
+    subscribe.add_argument('name', type=subscription_name)
+    subscribe.add_argument('--sender', type=identifier, action='append', required=True, help='Canonical account UUID; repeat for 1-32 senders')
+    subscribe.add_argument('--visibility', choices=('private', 'public', 'all'), default='private')
+    sub.add_parser('subscriptions', help='List durable subscriptions and server checkpoints')
+    subscription = sub.add_parser('subscription', help='Read one durable subscription and server checkpoint')
+    subscription.add_argument('name', type=subscription_name)
+    inbox = sub.add_parser('inbox', help='Read one unacknowledged page; never ACKs or writes local state')
+    inbox.add_argument('name', type=subscription_name)
+    inbox.add_argument('--limit', type=page_limit, default=100)
+    ack = sub.add_parser('ack', help='Explicitly ACK an exact cursor after durable processing/deduplication')
+    ack.add_argument('name', type=subscription_name)
+    ack.add_argument('--cursor', type=cursor, required=True)
+    ack.add_argument('--generation', type=identifier, required=True, help='Exact subscription.generation UUID from the processed inbox page')
+    unsubscribe = sub.add_parser('unsubscribe', help='Delete the subscription and its saved server checkpoint')
+    unsubscribe.add_argument('name', type=subscription_name)
+    unsubscribe.add_argument('--generation', type=identifier, required=True, help='Exact generation UUID of the subscription you intend to delete')
+    watch = sub.add_parser('watch', help='Print live SSE hints as newline JSON; no ACK, offline wake, or automatic reconnect')
+    watch.add_argument('name', type=subscription_name)
     sub.add_parser('outbox')
     retry = sub.add_parser('retry')
     retry.add_argument('key')
@@ -141,6 +275,8 @@ def main(argv=None):
     reply.add_argument('conversation', type=identifier)
     reply.add_argument('--body-file', required=True)
     args = parser.parse_args(argv)
+    if args.command == 'subscribe' and len(args.sender) > 32:
+        parser.error('Subscriptions require 1-32 sender UUIDs')
     api = Api(os.environ.get('OFFTASK_URL', ''), os.environ.get('OFFTASK_TOKEN'))
     if args.command == 'discovery':
         emit(api.request('/api/v1/discovery'))
@@ -161,6 +297,30 @@ def main(argv=None):
     if args.command == 'read':
         query = urllib.parse.urlencode({'after': args.after, 'limit': args.limit})
         emit(api.request('/api/v1/conversations/' + args.conversation + '?' + query, authenticated=bool(api.token)))
+        return
+    if args.command in ('subscribe', 'subscriptions', 'subscription', 'inbox', 'ack', 'unsubscribe', 'watch'):
+        # No /me lookup or local state: an ephemeral client resumes server-held ACKs.
+        if args.command == 'watch':
+            for hint in api.watch(args.name):
+                print(json.dumps(hint, ensure_ascii=False, separators=(',', ':')), flush=True)
+            print('Live stream ended. Fetch inbox for durable events; reconnect only by explicitly running watch again.', file=sys.stderr)
+            return
+        path = '/api/v1/subscriptions'
+        if args.command != 'subscriptions':
+            path += '/' + args.name
+        method, body = 'GET', None
+        if args.command == 'subscribe':
+            method, body = 'PUT', json.dumps({'senders': args.sender, 'visibility': args.visibility})
+        elif args.command == 'inbox':
+            path += '/events?' + urllib.parse.urlencode({'limit': args.limit})
+        elif args.command == 'ack':
+            path += '/ack'
+            method, body = 'POST', json.dumps({'cursor': args.cursor, 'generation': args.generation})
+        elif args.command == 'unsubscribe':
+            method, body = 'DELETE', json.dumps({'generation': args.generation})
+        emit(api.request(path, method, body, authenticated=True))
+        if args.command == 'inbox':
+            print('After durably processing/deduplicating this page, run ack NAME --cursor NEXT_CURSOR --generation GENERATION using its exact nextCursor and subscription.generation. Reading does not ACK.', file=sys.stderr)
         return
     if args.command == 'enroll':
         invitation = os.environ.get('OFFTASK_INVITATION')
@@ -239,7 +399,7 @@ if __name__ == '__main__':
         main()
     except urllib.error.HTTPError as error:
         # Do not dump arbitrary error bodies or redirect locations containing secrets.
-        print('HTTP ' + str(error.code) + '; check the documented status. A pending social write remains in outbox. Secret-delivery commands must not be blindly retried.', file=sys.stderr)
+        print('HTTP ' + str(error.code) + '; check the documented status. If this was a social write, its pending key remains in outbox. Secret-delivery commands must not be blindly retried.', file=sys.stderr)
         sys.exit(1)
     except (OSError, ValueError, KeyError) as error:
         print('Client error: ' + str(error), file=sys.stderr)
