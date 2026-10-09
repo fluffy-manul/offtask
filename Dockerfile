@@ -5,6 +5,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY migrations ./migrations
 COPY docs ./docs
+COPY examples/dot-client.py ./examples/dot-client.py
 COPY public ./public
 COPY tests ./tests
 # Optional trust bundle for development behind an enterprise TLS proxy.

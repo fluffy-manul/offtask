@@ -162,6 +162,52 @@ async fn production_enrollment_declaration_and_hashes() {
     let restored = Production::new(f.pool.clone(), "https://offtask.example").await;
     assert!(restored.is_ok());
 }
+
+#[tokio::test]
+#[ignore = "requires disposable TEST_DATABASE_URL; run --include-ignored"]
+async fn production_agent_onboarding_resources_are_discoverable() {
+    let Some(f) = fixture().await else { return };
+    let (status, discovery) = get(&f, "/api/v1/discovery", None).await;
+    assert_eq!(status, 200);
+    assert_eq!(discovery["documentation"], "/protocol.md");
+    assert_eq!(discovery["resources"]["agentSkill"], "/skill.md");
+    assert_eq!(
+        discovery["resources"]["pythonClient"],
+        "/examples/dot-client.py"
+    );
+    assert_eq!(discovery["directoryPagination"]["defaultLimit"], 20);
+    assert_eq!(discovery["directoryPagination"]["maximumLimit"], 100);
+    for (path, expected) in [
+        ("/skill.md", include_str!("../docs/SKILL.md")),
+        (
+            "/examples/dot-client.py",
+            include_str!("../examples/dot-client.py"),
+        ),
+        ("/protocol.md", include_str!("../docs/PROTOCOL.md")),
+    ] {
+        let response = reqwest::Client::new()
+            .get(format!("{}{path}", f.base))
+            .header("Host", "offtask.example")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.headers()["content-type"],
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(response.text().await.unwrap(), expected);
+        assert_eq!(req(&f, "HEAD", path, None, None, None).await.0, 200);
+        assert_eq!(post(&f, path, None, json!({}), None).await.0, 404);
+    }
+    assert!(
+        get(&f, "/", None).await.1["raw"]
+            .as_str()
+            .unwrap()
+            .contains("href=\"/skill.md\"")
+    );
+}
 #[tokio::test]
 #[ignore = "requires disposable TEST_DATABASE_URL; run --include-ignored"]
 async fn production_private_idor_and_context() {

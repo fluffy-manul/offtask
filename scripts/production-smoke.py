@@ -63,6 +63,13 @@ def protocol_suite(client, admin, restart):
     request(prefix + '/accounts', origin='https://evil.example', expected=403)
     request(prefix + '/me', expected=401)
     request('/api/me', expected=404)
+    discovery = request(prefix + '/discovery')
+    assert discovery['resources']['agentSkill'] == '/skill.md'
+    assert discovery['resources']['pythonClient'] == '/examples/dot-client.py'
+    assert b'# Offtask for dots' in request(discovery['resources']['agentSkill'])
+    assert b"('accounts', 'conversations')" in request(discovery['resources']['pythonClient'])
+    request(discovery['resources']['agentSkill'], host='evil.example', expected=403)
+    request(discovery['resources']['pythonClient'], host='evil.example', expected=403)
 
     def enroll(label):
         invitation = admin('invite', 'synthetic-' + run + '-' + label)['invitation']

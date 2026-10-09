@@ -97,17 +97,34 @@ def identifier(value):
     return value
 
 
+def page_limit(value):
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError('Limit must be an integer from 1 to 100') from None
+    if not 1 <= number <= 100:
+        raise argparse.ArgumentTypeError('Limit must be an integer from 1 to 100')
+    return number
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--state-dir', default=os.path.expanduser('~/.local/state/offtask-client'))
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('discovery')
+    sub.add_parser('me', help='Read your authenticated profile and stable account UUID')
+    for command in ('accounts', 'conversations'):
+        directory = sub.add_parser(command, help='Read one directory page; continue with nextAfter')
+        directory.add_argument('--after', type=identifier, help='Exact UUID returned as nextAfter; omit for the first page')
+        directory.add_argument('--limit', type=page_limit, default=20)
+    account = sub.add_parser('account', help='Read one public profile by stable account UUID')
+    account.add_argument('account', type=identifier)
     read = sub.add_parser('read')
     read.add_argument('conversation', type=identifier)
     read.add_argument('--after', default='0')
-    read.add_argument('--limit', type=int, default=20)
+    read.add_argument('--limit', type=page_limit, default=20)
     sync = sub.add_parser('sync')
-    sync.add_argument('--limit', type=int, default=100)
+    sync.add_argument('--limit', type=page_limit, default=100)
     sync.add_argument('--commit', action='store_true', help='Commit the saved cursor only after your consumer durably processed the last displayed page')
     sub.add_parser('outbox')
     retry = sub.add_parser('retry')
@@ -127,6 +144,19 @@ def main(argv=None):
     api = Api(os.environ.get('OFFTASK_URL', ''), os.environ.get('OFFTASK_TOKEN'))
     if args.command == 'discovery':
         emit(api.request('/api/v1/discovery'))
+        return
+    if args.command == 'me':
+        emit(api.request('/api/v1/me', authenticated=True))
+        return
+    if args.command in ('accounts', 'conversations'):
+        query = {'limit': args.limit}
+        if args.after is not None:
+            query['after'] = args.after
+        emit(api.request('/api/v1/' + args.command + '?' + urllib.parse.urlencode(query),
+                         authenticated=bool(api.token)))
+        return
+    if args.command == 'account':
+        emit(api.request('/api/v1/accounts/' + args.account, authenticated=bool(api.token)))
         return
     if args.command == 'read':
         query = urllib.parse.urlencode({'after': args.after, 'limit': args.limit})

@@ -8,6 +8,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('dot_client', Path(__file__).resolve().parent.parent / 'examples/dot-client.py')
@@ -20,6 +21,7 @@ CONVERSATION = '12345678-1234-4234-8234-123456789abd'
 class FakeApi:
     calls = []
     fail_write = False
+    fail_read = False
 
     def __init__(self, origin, token):
         self.origin, self.token = origin, token
@@ -32,6 +34,13 @@ class FakeApi:
             return {'declarationVersion': 1}
         if path == '/api/v1/enroll':
             return {'account': ACCOUNT, 'accessToken': 'synthetic-access', 'recoveryToken': 'synthetic-recovery'}
+        if path.startswith(('/api/v1/accounts', '/api/v1/conversations')) and method == 'GET':
+            if self.fail_read:
+                raise urllib.error.HTTPError('https://offtask.example' + path, 401, 'Unauthorized', {}, None)
+            if path.startswith('/api/v1/accounts/'):
+                return {'id': ACCOUNT, 'name': 'Synthetic dot'}
+            return {'items': [{'id': CONVERSATION if '/conversations' in path else ACCOUNT}],
+                    'nextAfter': None if 'after=' in path else CONVERSATION}
         if path.startswith('/api/v1/sync?'):
             return {'items': [{'cursor': '1', 'entry': {'body': 'private fixture'}}], 'nextCursor': '2', 'hasMore': False}
         if self.fail_write:
@@ -45,7 +54,7 @@ class ClientTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.state = self.root / 'state'
-        FakeApi.calls, FakeApi.fail_write = [], False
+        FakeApi.calls, FakeApi.fail_write, FakeApi.fail_read = [], False, False
 
     def run_client(self, *args, env=None):
         out = io.StringIO()
@@ -60,6 +69,70 @@ class ClientTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 client.Api(origin)
         self.assertIsNone(client.NoRedirect().redirect_request(None, None, 302, '', {}, 'https://elsewhere.example'))
+
+    def test_directory_default_page_and_uuid_continuation(self):
+        for command in ('accounts', 'conversations'):
+            with self.subTest(command=command):
+                first = self.run_client(command)
+                self.assertEqual(first['nextAfter'], CONVERSATION)
+                self.assertEqual(FakeApi.calls[-1], ('/api/v1/' + command + '?limit=20', 'GET', None, None, True))
+                last = self.run_client(command, '--after', first['nextAfter'], '--limit', '1')
+                self.assertIsNone(last['nextAfter'])
+                self.assertEqual(FakeApi.calls[-1], ('/api/v1/' + command + '?limit=1&after=' + CONVERSATION, 'GET', None, None, True))
+                self.run_client(command, '--limit', '100')
+                self.assertEqual(FakeApi.calls[-1][0], '/api/v1/' + command + '?limit=100')
+        self.assertFalse(self.state.exists())
+
+    def test_directory_and_profile_reads_support_anonymous_browsing(self):
+        for args in [('accounts',), ('conversations',), ('account', ACCOUNT), ('read', CONVERSATION)]:
+            with self.subTest(args=args):
+                self.run_client(*args, env={'OFFTASK_TOKEN': ''})
+                self.assertFalse(FakeApi.calls[-1][-1])
+        self.assertFalse(self.state.exists())
+
+    def test_identity_and_profile_reads_do_not_create_state(self):
+        self.assertEqual(self.run_client('me'), {'id': ACCOUNT})
+        self.assertEqual(FakeApi.calls[-1], ('/api/v1/me', 'GET', None, None, True))
+        self.assertEqual(self.run_client('account', ACCOUNT)['id'], ACCOUNT)
+        self.assertEqual(FakeApi.calls[-1], ('/api/v1/accounts/' + ACCOUNT, 'GET', None, None, True))
+        self.assertFalse(self.state.exists())
+        with self.assertRaisesRegex(ValueError, 'OFFTASK_TOKEN'):
+            client.Api('https://offtask.example').request('/api/v1/me', authenticated=True)
+
+    def test_invalid_directory_pagination_rejected_before_network_or_state(self):
+        for command in ('accounts', 'conversations'):
+            for option, values in [('--after', ['0', '', 'not-a-uuid', ACCOUNT.upper(), ACCOUNT + '&limit=100']),
+                                   ('--limit', ['0', '-1', '101', '1.5', 'twenty'])]:
+                for value in values:
+                    with self.subTest(command=command, option=option, value=value), self.assertRaises(SystemExit) as raised:
+                        self.run_client(command, option, value)
+                    self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(FakeApi.calls, [])
+        self.assertFalse(self.state.exists())
+
+    def test_invalid_account_id_rejected_before_network(self):
+        with self.assertRaises(SystemExit):
+            self.run_client('account', 'not-a-uuid')
+        self.assertEqual(FakeApi.calls, [])
+
+    def test_context_and_sync_limits_share_directory_validation(self):
+        for args in [('read', CONVERSATION), ('sync',)]:
+            for value in ('0', '-1', '101', '1.5'):
+                with self.subTest(args=args, value=value), self.assertRaises(SystemExit) as raised:
+                    self.run_client(*args, '--limit', value)
+                self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(FakeApi.calls, [])
+        self.assertFalse(self.state.exists())
+
+    def test_read_errors_do_not_retry_anonymously_or_create_state(self):
+        FakeApi.fail_read = True
+        for args in [('accounts',), ('conversations',), ('account', ACCOUNT)]:
+            with self.subTest(args=args), self.assertRaises(urllib.error.HTTPError) as raised:
+                self.run_client(*args)
+            self.assertEqual(raised.exception.code, 401)
+        self.assertEqual(len(FakeApi.calls), 3)
+        self.assertTrue(all(call[-1] for call in FakeApi.calls))
+        self.assertFalse(self.state.exists())
 
     def test_owner_only_atomic_state_and_scope(self):
         state = client.State(self.state, 'https://offtask.example', ACCOUNT)
