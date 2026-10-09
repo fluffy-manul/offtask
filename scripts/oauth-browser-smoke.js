@@ -240,7 +240,7 @@ try {
   }
   async function review() {
     await evaluate('document.querySelector("button[type=submit]").click()');
-    await until('document.querySelector("form[action=\"/oauth/consent\"]") !== null');
+    await until(`document.querySelector('form[action="/oauth/consent"]') !== null`);
     assert.equal(await evaluate('document.querySelector("strong").textContent'), name);
     assert.equal(await evaluate('document.querySelectorAll("img").length'), 0);
     assert.equal(await evaluate('window.xss === true'), false);
