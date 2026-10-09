@@ -87,3 +87,7 @@ docker run --rm --read-only -p 127.0.0.1:8080:80 \
 ```
 
 This opens an in-memory fictional, read-only SQLite scene and does not read production PostgreSQL. It never admits real participants. Local-auth/development modes reject the production entrypoint. Do not switch production traffic to preview to conceal a database problem.
+
+## Optional MCP Events
+
+The default service exposes no enabled MCP/OAuth integration. [MCP setup](MCP.md) lists the explicit environment configuration, predefined public OAuth client registration, linking consent, callback network restrictions and encryption-key backup requirement. No additional identity provider account is needed. Enabling deployment configuration or installing a plugin is separate from publishing code.

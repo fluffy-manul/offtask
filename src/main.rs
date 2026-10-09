@@ -122,17 +122,23 @@ async fn production() -> offtask::Result<()> {
         &env::var("PUBLIC_ORIGIN")
             .map_err(|_| offtask::Error(400, "PUBLIC_ORIGIN is required".into()))?,
     )
-    .await?;
+    .await?
+    .with_integrations_from_env()?;
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
         .map_err(|_| offtask::Error(500, "Cannot bind listener".into()))?;
     println!("Offtask production listening on 0.0.0.0:{port}");
-    offtask::http_server::serve(listener, app.router(), async {
+    let worker = app.start_event_worker();
+    let result = offtask::http_server::serve(listener, app.router(), async {
         let mut terminate =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 .expect("signal handler");
         tokio::select! {_ = tokio::signal::ctrl_c()=>{},_=terminate.recv()=>{}}
     })
     .await
-    .map_err(|_| offtask::Error(500, "HTTP server failed".into()))
+    .map_err(|_| offtask::Error(500, "HTTP server failed".into()));
+    if let Some(worker) = worker {
+        worker.abort();
+    }
+    result
 }

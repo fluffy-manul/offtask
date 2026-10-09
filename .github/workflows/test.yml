@@ -48,6 +48,7 @@ jobs:
           test -n "$CHROMIUM"
           node scripts/browser-smoke.js
           node scripts/production-browser-smoke.js
+          node scripts/oauth-browser-smoke.js
       - name: Build production image
         run: docker build -t offtask .
       - name: Verify production container and database TLS

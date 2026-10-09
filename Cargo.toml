@@ -7,6 +7,9 @@ default-run = "offtask"
 
 [dependencies]
 axum = "0.8"
+base64 = "0.22"
+ring = "0.17"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
@@ -25,5 +28,4 @@ sqlx-core = { version = "=0.8.6", default-features = false, features = ["_rt-tok
 sqlx-postgres = { version = "=0.8.6", default-features = false, features = ["json"] }
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tempfile = "3"

@@ -51,10 +51,14 @@ pub(super) fn route(path: &str) -> Result<Option<Route>> {
         _ => return Err(err(404, "Route not found")),
     }))
 }
-fn metadata(row: &sqlx::postgres::PgRow) -> Value {
+pub(super) fn metadata(row: &sqlx::postgres::PgRow) -> Value {
     json!({"generation":row.get::<String,_>("generation"),"name":row.get::<String,_>("name"),"senders":row.get::<Vec<String>,_>("senders"),"visibility":row.get::<String,_>("visibility"),"acknowledgedCursor":row.get::<i64,_>("acknowledged_cursor").to_string(),"deliveredCursor":row.get::<i64,_>("delivered_cursor").to_string(),"created":row.get::<String,_>("created")})
 }
-async fn subscription(tx: &mut Tx<'_>, who: &str, name: &str) -> Result<sqlx::postgres::PgRow> {
+pub(super) async fn subscription(
+    tx: &mut Tx<'_>,
+    who: &str,
+    name: &str,
+) -> Result<sqlx::postgres::PgRow> {
     sqlx::query("SELECT * FROM notification_subscriptions WHERE account=$1 AND name=$2")
         .bind(who)
         .bind(name)
@@ -213,7 +217,7 @@ pub(super) async fn write(
 
 // Use the same eligibility predicate for durable drain and live hints. No private
 // membership is granted by choosing a sender, a name, or an SSE Last-Event-ID.
-const ELIGIBLE: &str = "ev.kind='entry.created' AND NOT e.redacted AND e.author=ANY(s.senders) AND e.author<>s.account AND (s.visibility='all' OR c.visibility=s.visibility) AND (c.visibility='public' OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation=c.id AND p.account=s.account)) AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=s.account AND b.blocked=e.author) OR (b.blocker=e.author AND b.blocked=s.account))";
+pub(super) const ELIGIBLE: &str = "ev.kind='entry.created' AND NOT e.redacted AND e.author=ANY(s.senders) AND e.author<>s.account AND (s.visibility='all' OR c.visibility=s.visibility) AND (c.visibility='public' OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation=c.id AND p.account=s.account)) AND NOT EXISTS(SELECT 1 FROM blocks b WHERE (b.blocker=s.account AND b.blocked=e.author) OR (b.blocker=e.author AND b.blocked=s.account))";
 
 pub(super) async fn read(
     app: &Production,
@@ -268,10 +272,16 @@ async fn events(app: &Production, headers: &HeaderMap, name: &str, limit: i64) -
     // to one serialized operation, including concurrent ACKs, blocks and revocation.
     let mut tx = write_tx(&app.pool).await?;
     let who = actor_tx(&mut tx, headers).await?;
-    let row = subscription(&mut tx, &who, name).await?;
+    let value = events_tx(&mut tx, &who, name, limit).await?;
+    tx.commit().await.map_err(db_error)?;
+    Ok(value)
+}
+
+pub(super) async fn events_tx(tx: &mut Tx<'_>, who: &str, name: &str, limit: i64) -> Result<Value> {
+    let row = subscription(tx, who, name).await?;
     let acknowledged: i64 = row.get("acknowledged_cursor");
     let high: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id),0) FROM events")
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(db_error)?;
     if acknowledged > high || row.get::<i64, _>("delivered_cursor") > high {
@@ -283,7 +293,7 @@ async fn events(app: &Production, headers: &HeaderMap, name: &str, limit: i64) -
     // Separate persisted read budget, across replicas. Stream probes have their own
     // strict per-process connection bound and do not consume this budget.
     let count: i32 = sqlx::query_scalar("INSERT INTO rate_windows(actor,window_start,count) VALUES($1,$2,1) ON CONFLICT(actor) DO UPDATE SET window_start=$2,count=CASE WHEN rate_windows.window_start=$2 THEN rate_windows.count+1 ELSE 1 END RETURNING count")
-        .bind(format!("notifications:{who}")).bind(unix()/60).fetch_one(&mut *tx).await.map_err(db_error)?;
+        .bind(format!("notifications:{who}")).bind(unix()/60).fetch_one(&mut **tx).await.map_err(db_error)?;
     if count > 120 {
         return Err(err(
             429,
@@ -294,11 +304,11 @@ async fn events(app: &Production, headers: &HeaderMap, name: &str, limit: i64) -
         "SELECT ev.id AS cursor,ev.kind,ev.created AS event_created,e.*,c.title,c.visibility FROM notification_subscriptions s JOIN events ev ON ev.id>s.acknowledged_cursor JOIN entries e ON e.id=ev.entry JOIN conversations c ON c.id=ev.conversation WHERE s.account=$1 AND s.name=$2 AND ev.id<=$3 AND {ELIGIBLE} ORDER BY ev.id LIMIT $4"
     );
     let rows = sqlx::query(&query)
-        .bind(&who)
+        .bind(who)
         .bind(name)
         .bind(high)
         .bind(limit + 1)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .map_err(db_error)?;
     let more = rows.len() > limit as usize;
@@ -309,9 +319,8 @@ async fn events(app: &Production, headers: &HeaderMap, name: &str, limit: i64) -
         high
     };
     let row = sqlx::query("UPDATE notification_subscriptions SET delivered_cursor=GREATEST(delivered_cursor,$3) WHERE account=$1 AND name=$2 RETURNING *")
-        .bind(&who).bind(name).bind(next).fetch_one(&mut *tx).await.map_err(db_error)?;
+        .bind(who).bind(name).bind(next).fetch_one(&mut **tx).await.map_err(db_error)?;
     let result = json!({"subscription":metadata(&row),"items":items,"nextCursor":next.to_string(),"hasMore":more});
-    tx.commit().await.map_err(db_error)?;
     Ok(result)
 }
 

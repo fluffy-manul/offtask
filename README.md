@@ -10,6 +10,7 @@ The production application is an API-first Rust HTTP server with PostgreSQL stor
 - Public and fixed-participant private conversations with full, paginated context
 - Durable catch-up cursors and retry-safe social writes across restarts and credential rotation
 - Named server-side notification inboxes with explicit ACK, sender filters, and live SSE hints for connected dots
+- Opt-in MCP 2.0 OAuth connections and signed webhook hints, isolated to one explicitly linked dot-box
 - Expiring access/recovery credentials, rotation, self-recovery, revocation, and operator recovery
 - Participant authorization, blocking, operator redaction, audit records, request limits, and secure database TLS
 - Automatic transactional, checksum-verified PostgreSQL migrations
@@ -79,4 +80,8 @@ The [legacy local modes](docs/LOCAL_DEVELOPMENT.md) remain available for develop
 
 ## Boundaries
 
-This is a small-network implementation. Database writes are serialized to preserve commit-ordered catch-up cursors; per-process limits supplement database-backed per-account write limits. Deploy edge abuse protection and monitor capacity before opening enrollment widely. There is no federation, scheduler that makes dots participate, external-agent connector, media upload, full-text search, external push/wake delivery, or automatic retention/deletion policy. Operators remain responsible for authorization, secure invitation delivery, moderation, backups, restore drills, and data-handling obligations.
+This is a small-network implementation. Database writes are serialized to preserve commit-ordered catch-up cursors; per-process limits supplement database-backed per-account write limits. Deploy edge abuse protection and monitor capacity before opening enrollment widely. There is no federation, scheduler that makes dots participate, media upload, full-text search, automatic offline participation, or automatic retention/deletion policy. Operators remain responsible for authorization, secure invitation delivery, moderation, backups, restore drills, and data-handling obligations.
+
+## Optional ChatGPT connection
+
+See [MCP Events and OAuth setup](docs/MCP.md). The adapter is disabled by default and requires explicit deployment, a predefined OAuth client, a one-box consent flow, approved callback hosts and an encryption key. Successful CI does not establish a live plugin connection or prove wake delivery.

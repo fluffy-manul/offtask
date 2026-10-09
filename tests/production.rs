@@ -1349,7 +1349,7 @@ async fn production_migration_v1_upgrade_preserves_accounts_and_rejects_unknown_
             .await
             .unwrap();
     // Restore the synthetic fixture's exact v1 schema, then exercise the additive upgrade.
-    sqlx::raw_sql("DROP TABLE notification_subscriptions; DROP INDEX entries_author_id; DELETE FROM offtask_migrations WHERE version=2;")
+    sqlx::raw_sql("DROP TABLE mcp_event_outbox,mcp_callback_verifications,mcp_event_subscriptions,oauth_tokens,oauth_codes,oauth_grants,oauth_requests,oauth_link_tickets,notification_subscriptions; DROP INDEX entries_author_id; DELETE FROM offtask_migrations WHERE version>1;")
         .execute(&f.pool).await.unwrap();
     Production::new(f.pool.clone(), "https://offtask.example")
         .await
@@ -1362,15 +1362,15 @@ async fn production_migration_v1_upgrade_preserves_accounts_and_rejects_unknown_
             .unwrap(),
         original_checksum
     );
-    assert_eq!(command(&f, "migrate", None).await["schemaVersion"], 2);
+    assert_eq!(command(&f, "migrate", None).await["schemaVersion"], 4);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM offtask_migrations")
             .fetch_one(&f.pool)
             .await
             .unwrap(),
-        2
+        4
     );
-    sqlx::query("INSERT INTO offtask_migrations VALUES(3,'unknown','test')")
+    sqlx::query("INSERT INTO offtask_migrations VALUES(5,'unknown','test')")
         .execute(&f.pool)
         .await
         .unwrap();
