@@ -1431,6 +1431,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(initial.status(), 200);
+        assert_eq!(initial.headers()["referrer-policy"], "same-origin");
         let cookie = initial.headers()["set-cookie"]
             .to_str()
             .unwrap()
@@ -1458,6 +1459,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(selected.status(), 200);
+        assert_eq!(selected.headers()["referrer-policy"], "same-origin");
         assert!(selected.text().await.unwrap().contains(&f.account));
         let approved = client
             .post(format!("{}/oauth/consent", f.base))
@@ -1473,6 +1475,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(approved.status(), 303);
+        assert_eq!(approved.headers()["referrer-policy"], "no-referrer");
         assert!(
             approved.headers()["content-security-policy"]
                 .to_str()

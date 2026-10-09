@@ -1066,12 +1066,27 @@ async fn handle(State(app): State<Production>, req: Request) -> Response {
             axum::http::HeaderValue::from_static(value),
         );
     }
-    if let Some(policy) = oauth_csp
-        && let Ok(value) = axum::http::HeaderValue::from_str(&policy)
-    {
-        response
-            .headers_mut()
-            .insert("content-security-policy", value);
+    if let Some(policy) = oauth_csp {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&policy) {
+            response
+                .headers_mut()
+                .insert("content-security-policy", value);
+        }
+        // Fetch makes Origin:null on native form POST under no-referrer. Keep
+        // exact Origin + cookie + CSRF validation while allowing same-origin forms.
+        // Redirects stay no-referrer, so no authorization URL reaches the client.
+        if response.status() == StatusCode::OK
+            && response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.starts_with("text/html"))
+        {
+            response.headers_mut().insert(
+                "referrer-policy",
+                axum::http::HeaderValue::from_static("same-origin"),
+            );
+        }
     }
     if response.status() == StatusCode::TOO_MANY_REQUESTS
         || response.status() == StatusCode::SERVICE_UNAVAILABLE

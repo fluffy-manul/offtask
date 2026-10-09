@@ -32,8 +32,9 @@ let app, browser, ws, account, appError, routeError;
 let appLogs = '', sequence = 0;
 const calls = new Map(), routing = new Set();
 const requests = [], callbacks = [], responses = [], exceptions = [], blocked = [];
+const diagnostics = [];
 const tickets = [], browserSecrets = [], oauthCodes = [], issuedTokens = [];
-let env, base;
+let env, base, authorizeUrl;
 function admin(...args) {
   return JSON.parse(execFileSync(join(root, 'target/debug/offtask-admin'), args, { env, encoding: 'utf8', timeout: 30000 }));
 }
@@ -89,13 +90,34 @@ async function intercept(params, sessionId) {
       method: request.method, headers,
       ...(request.postData !== undefined ? { body: request.postData } : {}),
     });
+    const body = Buffer.from(await response.arrayBuffer());
+    const fields = new URLSearchParams(request.postData || '');
+    const diagnostic = { method: request.method, path: url.pathname, status: response.status,
+      hasCookie: header(request.headers, 'cookie') !== undefined,
+      hasOrigin: header(request.headers, 'origin') !== undefined,
+      originIsNull: header(request.headers, 'origin') === 'null',
+      originMatches: header(request.headers, 'origin') === origin,
+      hasReferer: header(request.headers, 'referer') !== undefined,
+      hasPostData: request.postData !== undefined,
+      hasRequestField: fields.has('request'), hasCsrfField: fields.has('csrf'), hasTicketField: fields.has('ticket') };
+    if (response.status >= 400) {
+      // Only known server error labels may enter logs. Never emit HTML, headers,
+      // query strings, POST bodies, cookies, codes, tickets, or token values.
+      let error;
+      try { error = JSON.parse(body.toString()).error; } catch { /* Non-JSON error. */ }
+      diagnostic.error = ['invalid_request', 'invalid_grant', 'invalid_client', 'Invalid host',
+        'Cross-origin access is disabled', 'Use application/x-www-form-urlencoded', 'Route not found']
+        .includes(error) ? error : '[unrecognized error omitted]';
+    }
+    diagnostics.push(diagnostic);
+    if (diagnostics.length > 12) diagnostics.shift();
     responses.push({ url: request.url, method: request.method, status: response.status, headers: Object.fromEntries(response.headers) });
     const responseHeaders = [...response.headers].filter(([name]) =>
       !['set-cookie', 'content-length', 'content-encoding', 'transfer-encoding', 'connection'].includes(name))
       .map(([name, value]) => ({ name, value }));
     for (const value of response.headers.getSetCookie()) responseHeaders.push({ name: 'set-cookie', value });
     await command('Fetch.fulfillRequest', { requestId, responseCode: response.status, responseHeaders,
-      body: Buffer.from(await response.arrayBuffer()).toString('base64') }, sessionId);
+      body: body.toString('base64') }, sessionId);
   } else if (url.origin === new URL(callback).origin && url.pathname === new URL(callback).pathname) {
     callbacks.push(request);
     await command('Fetch.fulfillRequest', { requestId, responseCode: 200, responseHeaders: [
@@ -195,9 +217,13 @@ try {
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
   }
-  async function until(expression) {
+  async function until(expression, responseStart) {
     const deadline = Date.now() + 20000;
     while (Date.now() < deadline) {
+      if (responseStart !== undefined && responses.slice(responseStart).some(response =>
+        response.method === 'POST' && response.status >= 400 && new URL(response.url).pathname.startsWith('/oauth/'))) {
+        throw new Error('OAuth browser form was rejected; see sanitized HTTP diagnostics.');
+      }
       try { if (await evaluate(expression)) return; } catch (error) {
         // A real form navigation can replace the execution context between polls.
         if (!/Execution context was destroyed|Cannot find context|Inspected target navigated/i.test(error.message)) throw error;
@@ -211,8 +237,11 @@ try {
     const query = new URLSearchParams({ response_type: 'code', client_id: client, redirect_uri: callback,
       scope: 'offtask:read offtask:ack offtask:events', state, resource,
       code_challenge: challenge, code_challenge_method: 'S256' });
-    await command('Page.navigate', { url: `${origin}/oauth/authorize?${query}` }, sessionId);
+    authorizeUrl = `${origin}/oauth/authorize?${query}`;
+    await command('Page.navigate', { url: authorizeUrl }, sessionId);
     await until(`location.origin === ${JSON.stringify(origin)} && document.querySelector('input[name="ticket"]') !== null`);
+    assert.equal(responses.findLast(response => response.method === 'GET' && response.url === authorizeUrl)
+      .headers['referrer-policy'], 'same-origin', 'The selection page must preserve native POST Origin');
     assert.equal(await evaluate('window.isSecureContext'), true);
     assert.equal(await evaluate('document.cookie'), '');
     assert.equal(await evaluate('localStorage.length + sessionStorage.length'), 0);
@@ -239,8 +268,12 @@ try {
     assert.equal(callbacks.length, before, 'A rejected CSRF request must not reach the callback');
   }
   async function review() {
+    const responseStart = responses.length;
     await evaluate('document.querySelector("button[type=submit]").click()');
-    await until(`document.querySelector('form[action="/oauth/consent"]') !== null`);
+    await until(`document.querySelector('form[action="/oauth/consent"]') !== null`, responseStart);
+    assert.equal(responses.findLast(response => response.method === 'POST' && response.url === `${origin}/oauth/authorize`)
+      .headers['referrer-policy'], 'same-origin', 'The consent page must preserve native POST Origin');
+    assert.equal(header(requests.findLast(request => request.method === 'POST' && request.url === `${origin}/oauth/authorize`).headers, 'origin'), origin);
     assert.equal(await evaluate('document.querySelector("strong").textContent'), name);
     assert.equal(await evaluate('document.querySelectorAll("img").length'), 0);
     assert.equal(await evaluate('window.xss === true'), false);
@@ -249,8 +282,10 @@ try {
     for (const secret of tickets) assert.equal(await evaluate(`document.documentElement.outerHTML.includes(${JSON.stringify(secret)})`), false);
   }
   async function submit(decision) {
+    const responseStart = responses.length;
     await evaluate(`document.querySelector('button[value="${decision}"]').click()`);
-    await until(`location.origin === ${JSON.stringify(new URL(callback).origin)} && document.getElementById('callback') !== null`);
+    await until(`location.origin === ${JSON.stringify(new URL(callback).origin)} && document.getElementById('callback') !== null`, responseStart);
+    assert.equal(header(requests.findLast(request => request.method === 'POST' && request.url === `${origin}/oauth/consent`).headers, 'origin'), origin);
     const result = new URL(await evaluate('location.href'));
     assert.equal(result.origin + result.pathname, callback);
     assert.equal(result.searchParams.get('iss'), origin);
@@ -294,10 +329,10 @@ try {
   issuedTokens.push(tokens.access_token, tokens.refresh_token);
   assert.equal((await exchange()).status, 400, 'An authorization code is single-use');
 
-  // Replay the consumed consent with an actual browser form. No new grant or
-  // callback may result, including after navigating away and revisiting the origin.
-  await command('Page.navigate', { url: `${origin}/healthz` }, sessionId);
-  await until(`location.href === ${JSON.stringify(`${origin}/healthz`)} && document.readyState === 'complete'`);
+  // Revisit a real OAuth form (with same-origin referrer policy), then replay the
+  // old consumed request and CSRF fields. No new grant or callback may result.
+  await command('Page.navigate', { url: authorizeUrl }, sessionId);
+  await until(`location.origin === ${JSON.stringify(origin)} && document.querySelector('input[name="ticket"]') !== null`);
   await evaluate(`{
     const form = document.createElement('form'); form.method = 'POST'; form.action = '/oauth/consent';
     for (const [name, value] of Object.entries(${JSON.stringify({ ...consentFields, decision: 'approve' })})) {
@@ -311,9 +346,10 @@ try {
   assert.equal(callbacks.length, 1, 'Consumed consent replay must not create another callback');
   const history = await command('Page.getNavigationHistory', {}, sessionId);
   const previous = history.entries[history.currentIndex - 1];
-  assert.equal(previous.url, `${origin}/healthz`);
+  assert.equal(new URL(previous.url).origin, origin);
+  assert.equal(new URL(previous.url).pathname, '/oauth/authorize');
   await command('Page.navigateToHistoryEntry', { entryId: previous.id }, sessionId);
-  await until(`location.href === ${JSON.stringify(`${origin}/healthz`)} && document.readyState === 'complete'`);
+  await until(`location.origin === ${JSON.stringify(origin)} && document.querySelector('input[name="ticket"]') !== null`);
   assert.equal(callbacks.length, 1, 'Going Back after a rejected replay must not grant access');
 
   const deniedState = await startFlow('deny');
@@ -360,6 +396,7 @@ try {
   console.log('OAuth Chromium smoke passed: synthetic HTTPS origins, Secure/HttpOnly cookies, real two-step consent, escaped box identity, CSRF rejection, registered cross-origin CSP redirect, unregistered form blocking, one-time code exchange, consumed-consent replay and Back, deny, and no credential leakage.');
 } catch (error) {
   console.error(appLogs);
+  if (diagnostics.length) console.error('Sanitized browser HTTP diagnostics:', JSON.stringify(diagnostics));
   throw error;
 } finally {
   await stop(browser);
